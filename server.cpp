@@ -150,7 +150,8 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
+    int yes = 1;
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 
     sockaddr_in addr;
     std::memset(&addr, 0, sizeof(addr));
