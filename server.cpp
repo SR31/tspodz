@@ -83,15 +83,10 @@ int handle_connection(int client_fd) {
     }
     uint64_t data_len = ntoh64(net_len);
     if (data_len == 0) {
-        std::cerr << "Получена длина 0\n";
-        return -1;
-    }
-    if (data_len > (1ULL<<30)) { // ограничение ~1GB
-        std::cerr << "Слишком большой размер: " << data_len << "\n";
+        std::cerr << "Файл пустой\n";
         return -1;
     }
 
-    // 2) прочитать данные
     std::string data;
     data.resize(data_len);
     r = recv_all(client_fd, &data[0], (size_t)data_len);
@@ -100,12 +95,10 @@ int handle_connection(int client_fd) {
         return -1;
     }
 
-    // 3) парсим числа
     std::istringstream iss(data);
     std::string token;
     std::ostringstream out;
     while (iss >> token) {
-        // пробуем распарсить целое (поддерживаем +/-, но римские только для положительных)
         bool ok = true;
         long val = 0;
         try {
@@ -140,7 +133,7 @@ int handle_connection(int client_fd) {
 
 int main(int argc, char* argv[]) {
     if (argc != 2) {
-        std::cerr << "Usage: " << argv[0] << " <port>\n";
+        std::cerr << "Использование: " << argv[0] << " <PORT>\n";
         return 1;
     }
     int port = 0;
@@ -150,21 +143,14 @@ int main(int argc, char* argv[]) {
         std::cerr << "Невалидный порт\n";
         return 1;
     }
-    if (port <= 0 || port > 65535) {
-        std::cerr << "Порт вне диапазона\n";
-        return 1;
-    }
 
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) {
-        std::cerr << "socket() failed: " << strerror(errno) << "\n";
+        std::cerr << "Ошибка создания сокета: " << strerror(errno) << "\n";
         return 1;
     }
 
-    int yes = 1;
-    if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) < 0) {
-        // не критично
-    }
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
 
     sockaddr_in addr;
     std::memset(&addr, 0, sizeof(addr));
@@ -173,13 +159,13 @@ int main(int argc, char* argv[]) {
     addr.sin_port = htons((uint16_t)port);
 
     if (bind(listen_fd, (sockaddr*)&addr, sizeof(addr)) < 0) {
-        std::cerr << "bind() failed: " << strerror(errno) << "\n";
+        std::cerr << "Ошибка привязки сокета: " << strerror(errno) << "\n";
         close(listen_fd);
         return 1;
     }
 
     if (listen(listen_fd, 5) < 0) {
-        std::cerr << "listen() failed: " << strerror(errno) << "\n";
+        std::cerr << "Ошибка в чтении данных: " << strerror(errno) << "\n";
         close(listen_fd);
         return 1;
     }
@@ -192,7 +178,7 @@ int main(int argc, char* argv[]) {
         int client_fd = accept(listen_fd, (sockaddr*)&client_addr, &client_len);
         if (client_fd < 0) {
             if (errno == EINTR) continue;
-            std::cerr << "accept() failed: " << strerror(errno) << "\n";
+            std::cerr << "Ошибка принятия подключения: " << strerror(errno) << "\n";
             break;
         }
         char ipbuf[INET_ADDRSTRLEN];
