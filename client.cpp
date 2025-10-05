@@ -126,6 +126,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::string reply;
+    uint64_t reply_len = ntoh64(net_reply_len);
     reply.resize(reply_len);
     if (reply_len > 0) {
         r = recv_all(fd, &reply[0], (size_t)reply_len);
