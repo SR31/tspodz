@@ -1,59 +1,31 @@
-#include <sys/types.h>
+#include "common.h"
+
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include <netdb.h>
+
+#include <iostream>
+#include <string>
 #include <cstring>
 #include <cerrno>
 
-#include <iostream>
-#include <fstream>
-#include <sstream>
-#include <string>
-#include <cstdint>
-
-static uint64_t hton64(uint64_t x) {
-    uint64_t hi = htonl((uint32_t)(x >> 32));
-    uint64_t lo = htonl((uint32_t)(x & 0xFFFFFFFFu));
-    return (lo << 32) | hi;
-}
-
-static uint64_t ntoh64(uint64_t x) {
-    uint64_t hi = ntohl((uint32_t)(x >> 32));
-    uint64_t lo = ntohl((uint32_t)(x & 0xFFFFFFFFu));
-    return (lo << 32) | hi;
-}
-
-ssize_t recv_all(int fd, void *buf, size_t len) {
-    char *p = (char*)buf;
-    size_t remaining = len;
-    while (remaining > 0) {
-        ssize_t r = recv(fd, p, remaining, 0);
-        if (r < 0) {
-            if (errno == EINTR) continue;
-            return -1;
+// Обрабатываем локально: превращаем числа в римские (этот шаг не обязателен, но оставлен для теста/отладки)
+static std::string process_numbers_local(const std::string& data) {
+    std::istringstream iss(data);
+    std::ostringstream out;
+    std::string token;
+    while (iss >> token) {
+        try {
+            size_t idx = 0;
+            long v = std::stol(token, &idx, 10);
+            if (idx != token.size()) throw std::invalid_argument("trailing");
+            out << token << " -> " << int_to_roman(static_cast<int>(v)) << "\n";
+        } catch (...) {
+            out << token << " -> N/A\n";
         }
-        if (r == 0) return 0; // closed
-        p += r;
-        remaining -= r;
     }
-    return (ssize_t)len;
-}
-
-ssize_t send_all(int fd, const void *buf, size_t len) {
-    const char *p = (const char*)buf;
-    size_t remaining = len;
-    while (remaining > 0) {
-        ssize_t s = send(fd, p, remaining, 0);
-        if (s < 0) {
-            if (errno == EINTR) continue;
-            return -1;
-        }
-        p += s;
-        remaining -= s;
-    }
-    return (ssize_t)len;
+    return out.str();
 }
 
 int main(int argc, char* argv[]) {
@@ -63,82 +35,121 @@ int main(int argc, char* argv[]) {
     }
     const char* server_ip = argv[1];
     int port = 0;
-    try {
-        port = std::stoi(argv[2]);
-    } catch (...) {
+    try { port = std::stoi(argv[2]); } catch (...) {
         std::cerr << "Невалидный порт\n";
         return 1;
     }
-    const char* path = argv[3];
+    const char* input_path = argv[3];
 
-    std::ifstream ifs(path, std::ios::binary);
-    if (!ifs) {
-        std::cerr << "Не удалось открыть файл: " << path << "\n";
-        return 1;
-    }
-    std::ostringstream oss;
-    oss << ifs.rdbuf();
-    std::string data = oss.str();
-    uint64_t data_len = data.size();
-
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        std::cerr << "Не удалось создать сокет: " << strerror(errno) << "\n";
+    std::string input_data;
+    if (!read_file(input_path, input_data)) {
+        std::cerr << "Не удалось прочитать входной файл: " << input_path << "\n";
         return 1;
     }
 
-    sockaddr_in srv;
-    std::memset(&srv, 0, sizeof(srv));
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        perror("socket");
+        return 1;
+    }
+
+    sockaddr_in srv{};
     srv.sin_family = AF_INET;
-    srv.sin_port = htons((uint16_t)port);
+    srv.sin_port = htons(static_cast<uint16_t>(port));
     if (inet_pton(AF_INET, server_ip, &srv.sin_addr) <= 0) {
-        std::cerr << "inet_pton() failed для " << server_ip << "\n";
-        close(fd);
+        std::cerr << "Ошибка преобразования адреса " << server_ip << "\n";
+        close(sock);
         return 1;
     }
 
-    if (connect(fd, (sockaddr*)&srv, sizeof(srv)) < 0) {
-        std::cerr << "Не удалось подключиться к указанному серверу: " << strerror(errno) << "\n";
-        close(fd);
+    if (connect(sock, reinterpret_cast<sockaddr*>(&srv), sizeof(srv)) < 0) {
+        std::cerr << "Не удалось подключиться к серверу " << server_ip << ":" << port
+                  << " - " << strerror(errno) << "\n";
+        close(sock);
+        return 1;
+    }
+    std::cout << "Соединение с сервером " << server_ip << ":" << port << "\n";
+
+    uint8_t req = REQ_PROCESS;
+    if (send_all(sock, &req, 1) < 0) {
+        std::cerr << "Ошибка отправки типа запроса\n";
+        close(sock);
         return 1;
     }
 
-    uint64_t net_len = hton64(data_len);
-    if (send_all(fd, &net_len, sizeof(net_len)) < 0) {
-        std::cerr << "Ошибка отправки размера: " << strerror(errno) << "\n";
-        close(fd);
+    uint64_t len = input_data.size();
+    uint64_t net_len = hton64(len);
+    if (send_all(sock, &net_len, sizeof(net_len)) < 0 ||
+        (len > 0 && send_all(sock, input_data.data(), len) < 0)) {
+        std::cerr << "Ошибка отправки файла на сервер\n";
+        close(sock);
         return 1;
     }
-    if (data_len > 0) {
-        if (send_all(fd, data.data(), data_len) < 0) {
-            std::cerr << "Ошибка отправки данных: " << strerror(errno) << "\n";
-            close(fd);
+    std::cout << "Файл отправлен на сервер\n";
+
+    uint64_t net_rlen = 0;
+    if (recv_all(sock, &net_rlen, sizeof(net_rlen)) < 0) {
+        std::cerr << "Ошибка чтения длины результата от сервера\n";
+        close(sock);
+        return 1;
+    }
+
+    uint64_t rlen = ntoh64(net_rlen);
+    std::string result;
+    result.resize(rlen);
+    if (rlen > 0) {
+        if (recv_all(sock, &result[0], static_cast<size_t>(rlen)) < 0) {
+            std::cerr << "Ошибка чтения результата от сервера\n";
+            close(sock);
             return 1;
         }
     }
 
-    uint64_t net_reply_len = 0;
-    ssize_t r = recv_all(fd, &net_reply_len, sizeof(net_reply_len));
-    if (r <= 0) {
-        std::cerr << "Ошибка чтения размера ответа или соединение закрыто\n";
-        close(fd);
+    std::cout << "Результат от сервера:\n" << result;
+    const char* out_name = "output";
+    if (!write_file(out_name, result)) {
+        std::cerr << "Ошибка записи " << out_name << "\n";
+        close(sock);
+        return 1;
+    }
+    std::cout << "Результат сохранён локально как " << out_name << "\n";
+
+    std::string output_data;
+    if (!read_file(out_name, output_data)) {
+        std::cerr << "Ошибка чтения файла с результатом\n";
+        close(sock);
+        return 1;
+    }
+    // пустой файл допустим: len==0
+    req = REQ_UPLOAD;
+    if (send_all(sock, &req, 1) < 0) {
+        std::cerr << "Ошибка отправки типа запроса\n";
+        close(sock);
         return 1;
     }
 
-    std::string reply;
-    uint64_t reply_len = ntoh64(net_reply_len);
-    reply.resize(reply_len);
-    if (reply_len > 0) {
-        r = recv_all(fd, &reply[0], (size_t)reply_len);
-        if (r <= 0) {
-            std::cerr << "Ошибка чтения ответа: " << strerror(errno) << "\n";
-            close(fd);
-            return 1;
-        }
+    uint64_t olen = output_data.size();
+    uint64_t net_olen = hton64(olen);
+    if (send_all(sock, &net_olen, sizeof(net_olen)) < 0 ||
+        (olen > 0 && send_all(sock, output_data.data(), olen) < 0)) {
+        std::cerr << "Ошибка отправки файла на сервер\n";
+        close(sock);
+        return 1;
+    }
+    std::cout << "Файл отправлен серверу\n";
+
+    uint8_t status = 1;
+    if (recv_all(sock, &status, 1) < 0) {
+        std::cerr << "Ошибка получения статуса от сервера\n";
+        close(sock);
+        return 1;
+    }
+    if (status == 0) {
+        std::cout << "Сервер успешно сохранил файл\n";
+    } else {
+        std::cerr << "Сервер не смог сохранить файл\n";
     }
 
-    std::cout << reply;
-
-    close(fd);
+    close(sock);
     return 0;
 }
